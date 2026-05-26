@@ -53,6 +53,23 @@ Do not double-click `windows-app\bin\xray.exe` directly. Xray is only the runtim
 - `windows-app\core\` - upstream Python SNI bridge with the Windows import fix.
 - `scripts\setup_windows.ps1` - venv/dependency setup and optional Xray download.
 - `scripts\start_windows_app.ps1` - starts the GUI, optionally elevated.
+- `scripts\build_windows_package.ps1` - builds a release zip with `Cloak-Windows.exe`, bundled listener, Xray runtime files, and legal notices.
+
+## Build a release package
+
+After setup has downloaded Xray, build a zip release:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_package.ps1 -Version 0.1.0-alpha
+```
+
+The release asset will be created under `dist\`, for example:
+
+```text
+dist\Cloak-Windows-v0.1.0-alpha.zip
+```
+
+Upload that zip to GitHub Releases. Do not upload `windows-app\bin\xray.exe` by itself.
 
 ## License
 

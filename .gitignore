@@ -16,6 +16,8 @@ ENV/
 
 # Local runtime/app state
 data/
+build/
+dist/
 *.log
 *.tmp
 *.bak

@@ -27,9 +27,16 @@ from system_windows import (
 from xray_config import generate, generate_for_ports
 
 
-ROOT_DIR = Path(__file__).resolve().parent
+def _app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+ROOT_DIR = _app_base_dir()
 CORE_DIR = ROOT_DIR / "core"
 LISTENER_MAIN = CORE_DIR / "main.py"
+DEFAULT_LISTENER = ROOT_DIR / "bin" / "cloak-listener.exe"
 DEFAULT_XRAY = ROOT_DIR / "bin" / "xray.exe"
 
 
@@ -74,7 +81,14 @@ class CloakController:
 
     def xray_path(self) -> Path:
         configured = self.settings.xray_path.strip()
-        return Path(configured) if configured else DEFAULT_XRAY
+        if configured:
+            configured_path = Path(configured)
+            if configured_path.exists():
+                return configured_path
+        return DEFAULT_XRAY
+
+    def listener_exe_path(self) -> Path | None:
+        return DEFAULT_LISTENER if DEFAULT_LISTENER.exists() else None
 
     def python_path(self) -> str:
         configured = self.settings.python_path.strip()
@@ -128,7 +142,7 @@ class CloakController:
         xray = self.xray_path()
         if not xray.exists():
             raise RuntimeError(f"xray.exe was not found at {xray}. Put xray.exe in windows-app\\bin or choose it in Settings.")
-        if not LISTENER_MAIN.exists():
+        if self.listener_exe_path() is None and not LISTENER_MAIN.exists():
             raise RuntimeError("The Python listener core is missing.")
 
         self._normalize_ports()
@@ -312,14 +326,16 @@ class CloakController:
             __import__("json").dumps(asdict(self.listener_config), indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        env = env_with_python_path([CORE_DIR])
+        env = env_with_python_path([CORE_DIR]) if CORE_DIR.exists() else os.environ.copy()
         env["CLOAK_CONFIG"] = str(runtime_config)
-        self.listener_process = self._spawn_process(
-            [self.python_path(), "-u", str(LISTENER_MAIN)],
-            cwd=CORE_DIR,
-            env=env,
-            label="listener",
-        )
+        listener_exe = self.listener_exe_path()
+        if listener_exe is not None:
+            command = [str(listener_exe)]
+            cwd = listener_exe.parent
+        else:
+            command = [self.python_path(), "-u", str(LISTENER_MAIN)]
+            cwd = CORE_DIR
+        self.listener_process = self._spawn_process(command, cwd=cwd, env=env, label="listener")
         time.sleep(0.4)
         if self.listener_process.poll() is not None:
             raise RuntimeError("Python listener exited immediately. Install requirements and check Logs.")
