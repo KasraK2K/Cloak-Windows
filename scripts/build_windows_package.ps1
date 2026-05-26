@@ -92,6 +92,7 @@ if ($LASTEXITCODE -ne 0) { throw "Building cloak-listener.exe failed." }
     --workpath $GuiWork `
     --specpath $SpecDir `
     --add-data "$(Join-Path $AppDir 'assets\Cloak.png');assets" `
+    --collect-data sv_ttk `
     (Join-Path $AppDir "cloak_windows.py")
 if ($LASTEXITCODE -ne 0) { throw "Building Cloak-Windows.exe failed." }
 

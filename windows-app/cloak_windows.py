@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+import sv_ttk
+
+try:
+    import pywinstyles  # type: ignore
+except Exception:  # pragma: no cover - non-Windows or missing dep
+    pywinstyles = None
 
 from controller import CloakController, DEFAULT_XRAY, ROOT_DIR
 from models import (
@@ -21,12 +30,95 @@ from profile_exporter import ProfileExportError, export_text
 from system_windows import is_admin, relaunch_as_admin
 
 
+PALETTE_DARK = {
+    "bg":              "#1c1c1c",
+    "card":            "#2b2b2b",
+    "card_alt":        "#373737",
+    "text":            "#ffffff",
+    "subtle":          "#9d9d9d",
+    "border":          "#454545",
+    "accent":          "#57c8ff",
+    "accent_fg":       "#0b1117",
+    "success":         "#6ccb5f",
+    "danger":          "#ff99a4",
+    "warn":            "#f0b86b",
+    "pill_success_bg": "#1d3829",
+    "pill_success_fg": "#9ddf94",
+    "pill_warn_bg":    "#3d2c0a",
+    "pill_warn_fg":    "#f0c674",
+    "pill_subtle_bg":  "#3a3a3a",
+    "pill_subtle_fg":  "#cdcdcd",
+    "pill_danger_bg":  "#3a1d1d",
+    "pill_danger_fg":  "#ff99a4",
+    "ping_good":       "#6ccb5f",
+    "ping_okay":       "#f0b86b",
+    "ping_bad":        "#ff99a4",
+    "ping_dead":       "#7e7e7e",
+}
+
+PALETTE_LIGHT = {
+    "bg":              "#f3f3f3",
+    "card":            "#ffffff",
+    "card_alt":        "#f9f9f9",
+    "text":            "#1a1a1a",
+    "subtle":          "#5d5d5d",
+    "border":          "#d1d1d1",
+    "accent":          "#005fb8",
+    "accent_fg":       "#ffffff",
+    "success":         "#107c10",
+    "danger":          "#c42b1c",
+    "warn":            "#9e7800",
+    "pill_success_bg": "#dcf4dc",
+    "pill_success_fg": "#0b6a0b",
+    "pill_warn_bg":    "#fff4ce",
+    "pill_warn_fg":    "#7d5a00",
+    "pill_subtle_bg":  "#ededed",
+    "pill_subtle_fg":  "#454545",
+    "pill_danger_bg":  "#fde7e9",
+    "pill_danger_fg":  "#a52d22",
+    "ping_good":       "#107c10",
+    "ping_okay":       "#9e7800",
+    "ping_bad":        "#c42b1c",
+    "ping_dead":       "#8a8a8a",
+}
+
+
+# Segoe Fluent Icons / Segoe MDL2 Assets — installed by default on Win10/11.
+# When the font isn't available the codepoints render as boxes; we fall back to
+# plain text labels on the buttons either way.
+ICON_POWER     = ""
+ICON_DOWN      = ""
+ICON_UP        = ""
+ICON_SIGMA     = ""
+ICON_CLOCK     = ""
+ICON_GLOBE     = ""
+ICON_INFO      = ""
+ICON_SHIELD    = ""
+ICON_SUN       = ""
+ICON_MOON      = ""
+ICON_SYSTEM    = ""
+ICON_ADD       = ""
+ICON_IMPORT    = ""
+ICON_RENAME    = ""
+ICON_EXPORT    = ""
+ICON_DELETE    = ""
+ICON_PING      = ""
+ICON_CANCEL    = ""
+ICON_BROOM     = ""
+ICON_CLEAR     = ""
+ICON_FOLDER    = ""
+ICON_COPY      = ""
+ICON_PAUSE     = ""
+ICON_PLAY      = ""
+ICON_REFRESH   = ""
+
+
 class CloakWindowsApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Cloak for Windows")
-        self.geometry("1040x720")
-        self.minsize(920, 600)
+        self.geometry("1080x740")
+        self.minsize(960, 640)
 
         self.store = ConfigStore()
         self.settings = self.store.load_settings()
@@ -38,6 +130,13 @@ class CloakWindowsApp(tk.Tk):
         self.ping_cancel = threading.Event()
         self.egress_ip: str | None = None
         self.egress_country: str | None = None
+        self._toast_after_id: str | None = None
+        self._pulse_after_id: str | None = None
+        self._pulse_phase = False
+        self._autoscroll_paused = False
+        self._themed_text_widgets: list[tk.Text] = []
+        self._themed_canvases: list[tk.Canvas] = []
+        self._theme_listeners: list = []
 
         self.controller = CloakController(
             self.store,
@@ -48,14 +147,17 @@ class CloakWindowsApp(tk.Tk):
         )
 
         self._load_icon()
-        self._configure_style()
+        self._init_fonts()
         self._create_vars()
+        self._apply_theme(self.settings.appearance_mode, first=True)
         self._build_shell()
         self.refresh_all()
         self.after(120, self._drain_queue)
         self.after(1000, self._tick)
         self.after(3000, self._ensure_window_visible)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ── Infrastructure ──────────────────────────────────────────────────────
 
     def post(self, kind: str, *payload) -> None:
         self.ui_queue.put((kind, payload))
@@ -69,18 +171,263 @@ class CloakWindowsApp(tk.Tk):
             except tk.TclError:
                 self._icon_image = None
 
-    def _configure_style(self) -> None:
-        style = ttk.Style(self)
+    def _init_fonts(self) -> None:
+        families = set(tkfont.families())
+        ui_family = next(
+            (name for name in ("Segoe UI Variable", "Segoe UI") if name in families),
+            "Segoe UI",
+        )
+        mono_family = next(
+            (name for name in ("Cascadia Mono", "Cascadia Code", "Consolas") if name in families),
+            "Consolas",
+        )
+        icon_family = next(
+            (name for name in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if name in families),
+            "Segoe UI Symbol",
+        )
+        self._fonts = {
+            "ui":        (ui_family, 10),
+            "ui_bold":   (ui_family, 10, "bold"),
+            "ui_caption":(ui_family, 9),
+            "ui_micro":  (ui_family, 8, "bold"),
+            "ui_title":  (ui_family, 22, "bold"),
+            "ui_status": (ui_family, 22, "bold"),
+            "ui_metric": (ui_family, 17, "bold"),
+            "ui_brand":  (ui_family, 13, "bold"),
+            "mono":      (mono_family, 10),
+            "icon":      (icon_family, 11),
+            "icon_lg":   (icon_family, 14),
+            "icon_xl":   (icon_family, 22),
+        }
+
+    # ── Theme ───────────────────────────────────────────────────────────────
+
+    def _resolve_theme(self, mode: str) -> str:
+        if mode == "light":
+            return "light"
+        if mode == "dark":
+            return "dark"
+        if sys.platform == "win32":
+            try:
+                import winreg
+
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                )
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                winreg.CloseKey(key)
+                return "light" if value else "dark"
+            except OSError:
+                pass
+        return "dark"
+
+    def _apply_theme(self, mode: str, *, first: bool = False) -> None:
+        resolved = self._resolve_theme(mode)
+        sv_ttk.set_theme(resolved)
+        self._palette = PALETTE_DARK if resolved == "dark" else PALETTE_LIGHT
+        self._configure_style_overlays()
+        self._retint_themed_widgets()
+        self._apply_window_chrome(resolved)
+        if not first:
+            self._notify_theme_listeners()
+
+    def _apply_window_chrome(self, mode: str) -> None:
+        if pywinstyles is None or sys.platform != "win32":
+            return
+        # Mica needs Windows 11; on 10 it falls back to plain titlebar colour.
+        for style_name in ("mica", "normal"):
+            try:
+                pywinstyles.apply_style(self, style_name if style_name == "mica" else None)
+                break
+            except Exception:
+                continue
         try:
-            style.theme_use("vista")
-        except tk.TclError:
-            style.theme_use("clam")
-        style.configure("Header.TLabel", font=("Segoe UI", 17, "bold"))
-        style.configure("Subtle.TLabel", foreground="#5f6877")
-        style.configure("Status.TLabel", font=("Segoe UI", 15, "bold"))
-        style.configure("Metric.TLabel", font=("Segoe UI", 14, "bold"))
-        style.configure("Danger.TButton", foreground="#9a1b1b")
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+            pywinstyles.change_header_color(
+                self, "#1c1c1c" if mode == "dark" else "#f3f3f3"
+            )
+            pywinstyles.change_title_color(
+                self, "#ffffff" if mode == "dark" else "#1a1a1a"
+            )
+        except Exception:
+            pass
+
+    def _configure_style_overlays(self) -> None:
+        p = self._palette
+        style = ttk.Style(self)
+
+        # Accent + danger button variants — sv-ttk already ships Accent.TButton;
+        # we re-register to tune padding/font so the hero Connect button reads big.
+        style.configure(
+            "Hero.Accent.TButton",
+            font=(self._fonts["ui_bold"][0], 12, "bold"),
+            padding=(26, 11),
+        )
+        style.configure(
+            "Hero.Danger.TButton",
+            font=(self._fonts["ui_bold"][0], 12, "bold"),
+            padding=(26, 11),
+        )
+        style.map(
+            "Hero.Danger.TButton",
+            foreground=[("!disabled", "#ffffff")],
+            background=[
+                ("pressed", "#7f1d1d"),
+                ("active", "#b91c1c"),
+                ("!disabled", "#c42b1c"),
+            ],
+        )
+
+        # Pills (small rounded labels)
+        for variant in ("Success", "Warn", "Subtle", "Danger", "Accent"):
+            key = variant.lower()
+            if variant == "Accent":
+                bg = p["accent"]
+                fg = p["accent_fg"]
+            else:
+                bg = p[f"pill_{key}_bg"]
+                fg = p[f"pill_{key}_fg"]
+            style.configure(
+                f"Pill.{variant}.TLabel",
+                background=bg,
+                foreground=fg,
+                font=(self._fonts["ui_micro"][0], 8, "bold"),
+                padding=(8, 3),
+            )
+
+        # Brand + title typography
+        style.configure(
+            "Brand.TLabel",
+            font=self._fonts["ui_brand"],
+            foreground=p["text"],
+        )
+        style.configure(
+            "Title.TLabel",
+            font=self._fonts["ui_title"],
+            foreground=p["text"],
+        )
+        style.configure(
+            "Status.TLabel",
+            font=self._fonts["ui_status"],
+            foreground=p["text"],
+        )
+        style.configure(
+            "Subtle.TLabel",
+            font=self._fonts["ui"],
+            foreground=p["subtle"],
+        )
+        style.configure(
+            "Caption.TLabel",
+            font=self._fonts["ui_caption"],
+            foreground=p["subtle"],
+        )
+        style.configure(
+            "Section.TLabel",
+            font=self._fonts["ui_micro"],
+            foreground=p["subtle"],
+        )
+        style.configure(
+            "Metric.TLabel",
+            font=self._fonts["ui_metric"],
+            foreground=p["text"],
+        )
+        style.configure(
+            "MetricCaption.TLabel",
+            font=self._fonts["ui_caption"],
+            foreground=p["subtle"],
+        )
+        style.configure(
+            "Icon.TLabel",
+            font=self._fonts["icon_lg"],
+            foreground=p["subtle"],
+        )
+        style.configure(
+            "IconHero.TLabel",
+            font=self._fonts["icon_xl"],
+            foreground=p["accent"],
+        )
+
+        # Compact secondary buttons used in toolbars (icon + label)
+        style.configure(
+            "Toolbar.TButton",
+            font=self._fonts["ui"],
+            padding=(10, 6),
+        )
+
+        # Toast label
+        style.configure(
+            "Toast.TLabel",
+            background=p["pill_subtle_bg"],
+            foreground=p["pill_subtle_fg"],
+            font=self._fonts["ui_caption"],
+            padding=(12, 6),
+        )
+
+        # Treeview row tinting for ping levels
+        style.configure(
+            "Treeview",
+            rowheight=34,
+            font=self._fonts["ui"],
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=self._fonts["ui_micro"],
+        )
+
+    def _retint_themed_widgets(self) -> None:
+        p = self._palette
+        card_bg = self._lookup_card_bg()
+        for widget in list(self._themed_text_widgets):
+            try:
+                widget.configure(
+                    background=p["card_alt"],
+                    foreground=p["text"],
+                    insertbackground=p["text"],
+                    selectbackground=p["accent"],
+                    selectforeground=p["accent_fg"],
+                )
+            except tk.TclError:
+                self._themed_text_widgets.remove(widget)
+        for canvas in list(self._themed_canvases):
+            try:
+                canvas.configure(background=card_bg)
+            except tk.TclError:
+                self._themed_canvases.remove(canvas)
+        if hasattr(self, "log_text"):
+            try:
+                self.log_text.tag_configure("stderr", foreground=p["danger"])
+                self.log_text.tag_configure("stdout", foreground=p["text"])
+            except tk.TclError:
+                pass
+        if hasattr(self, "profile_tree"):
+            try:
+                self.profile_tree.tag_configure("ping_good", foreground=p["ping_good"])
+                self.profile_tree.tag_configure("ping_okay", foreground=p["ping_okay"])
+                self.profile_tree.tag_configure("ping_bad", foreground=p["ping_bad"])
+                self.profile_tree.tag_configure("ping_dead", foreground=p["ping_dead"])
+            except tk.TclError:
+                pass
+        if hasattr(self, "_status_dot"):
+            self._refresh_status_dot()
+        if hasattr(self, "_theme_toggle_button"):
+            self._refresh_theme_toggle_icon()
+
+    def _lookup_card_bg(self) -> str:
+        style = ttk.Style(self)
+        for name in ("Card.TFrame", "TFrame"):
+            value = style.lookup(name, "background")
+            if value:
+                return value
+        return self._palette["card"]
+
+    def _notify_theme_listeners(self) -> None:
+        for callback in self._theme_listeners:
+            try:
+                callback()
+            except Exception:
+                pass
+
+    # ── State variables ─────────────────────────────────────────────────────
 
     def _create_vars(self) -> None:
         self.status_var = tk.StringVar(value="Disconnected")
@@ -103,185 +450,595 @@ class CloakWindowsApp(tk.Tk):
         self.up_var = tk.StringVar(value="0 KB/s")
         self.total_var = tk.StringVar(value="0 B")
         self.endpoint_var = tk.StringVar()
+        self.toast_var = tk.StringVar(value="")
+        self.profile_count_var = tk.StringVar(value="0 profiles")
+
+    # ── Shell ───────────────────────────────────────────────────────────────
 
     def _build_shell(self) -> None:
-        outer = ttk.Frame(self, padding=16)
-        outer.pack(fill=tk.BOTH, expand=True)
+        self._build_top_bar()
 
-        header = ttk.Frame(outer)
-        header.pack(fill=tk.X)
-        ttk.Label(header, text="Cloak for Windows", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Label(header, textvariable=self.admin_var, style="Subtle.TLabel").pack(side=tk.RIGHT)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=14, pady=(8, 6))
 
-        self.notebook = ttk.Notebook(outer)
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+        self.dashboard_tab = ttk.Frame(self.notebook)
+        self.profiles_tab = ttk.Frame(self.notebook)
+        self.settings_tab = ttk.Frame(self.notebook)
+        self.logs_tab = ttk.Frame(self.notebook)
+        self.about_tab = ttk.Frame(self.notebook)
 
-        self.dashboard_tab = ttk.Frame(self.notebook, padding=12)
-        self.profiles_tab = ttk.Frame(self.notebook, padding=12)
-        self.settings_tab = ttk.Frame(self.notebook, padding=12)
-        self.logs_tab = ttk.Frame(self.notebook, padding=12)
-        self.about_tab = ttk.Frame(self.notebook, padding=12)
-        self.notebook.add(self.dashboard_tab, text="Dashboard")
-        self.notebook.add(self.profiles_tab, text="Profiles")
-        self.notebook.add(self.settings_tab, text="Settings")
-        self.notebook.add(self.logs_tab, text="Logs")
-        self.notebook.add(self.about_tab, text="About")
+        self.notebook.add(self.dashboard_tab, text="  Dashboard  ")
+        self.notebook.add(self.profiles_tab, text="  Profiles  ")
+        self.notebook.add(self.settings_tab, text="  Settings  ")
+        self.notebook.add(self.logs_tab, text="  Logs  ")
+        self.notebook.add(self.about_tab, text="  About  ")
 
         self._build_dashboard()
         self._build_profiles()
         self._build_settings()
         self._build_logs()
         self._build_about()
+        self._build_toast()
+
+    def _build_top_bar(self) -> None:
+        bar = ttk.Frame(self, padding=(18, 12, 14, 8))
+        bar.pack(fill=tk.X)
+
+        brand_wrap = ttk.Frame(bar)
+        brand_wrap.pack(side=tk.LEFT)
+        ttk.Label(brand_wrap, text=ICON_SHIELD, style="IconHero.TLabel").pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Label(brand_wrap, text="Cloak", style="Brand.TLabel").pack(side=tk.LEFT)
+        ttk.Label(brand_wrap, text="for Windows", style="Caption.TLabel").pack(
+            side=tk.LEFT, padx=(8, 0), pady=(6, 0)
+        )
+
+        right = ttk.Frame(bar)
+        right.pack(side=tk.RIGHT)
+
+        if is_admin():
+            self.admin_pill = ttk.Label(
+                right,
+                text="ADMINISTRATOR",
+                style="Pill.Success.TLabel",
+            )
+        else:
+            self.admin_pill = ttk.Label(
+                right,
+                text="STANDARD USER  •  CLICK TO ELEVATE",
+                style="Pill.Warn.TLabel",
+                cursor="hand2",
+            )
+            self.admin_pill.bind("<Button-1>", lambda _e: self.relaunch_admin())
+        self.admin_pill.pack(side=tk.RIGHT, padx=(8, 0))
+
+        self._theme_toggle_button = ttk.Button(
+            right,
+            text=ICON_MOON,
+            style="Toolbar.TButton",
+            width=3,
+            command=self._cycle_appearance_mode,
+        )
+        self._theme_toggle_button.pack(side=tk.RIGHT, padx=(6, 0))
+        # The toggle uses the icon font directly for the glyph.
+        self._theme_toggle_button.configure(takefocus=False)
+        self._refresh_theme_toggle_icon()
+
+    def _refresh_theme_toggle_icon(self) -> None:
+        mode = self.settings.appearance_mode
+        glyph = {"light": ICON_SUN, "dark": ICON_MOON, "system": ICON_SYSTEM}.get(
+            mode, ICON_SYSTEM
+        )
+        ttk.Style(self).configure(
+            "ThemeToggle.Toolbar.TButton",
+            font=self._fonts["icon"],
+            padding=(8, 6),
+        )
+        try:
+            self._theme_toggle_button.configure(
+                text=glyph,
+                style="ThemeToggle.Toolbar.TButton",
+            )
+        except tk.TclError:
+            pass
+
+    def _cycle_appearance_mode(self) -> None:
+        order = ["system", "light", "dark"]
+        try:
+            index = order.index(self.settings.appearance_mode)
+        except ValueError:
+            index = 0
+        new_mode = order[(index + 1) % len(order)]
+        self.appearance_var.set(new_mode)
+        self.settings.appearance_mode = new_mode
+        self.store.save_settings(self.settings)
+        self._apply_theme(new_mode)
+        self._show_toast(f"Appearance set to {new_mode.title()}")
+
+    # ── Dashboard ───────────────────────────────────────────────────────────
 
     def _build_dashboard(self) -> None:
-        top = ttk.LabelFrame(self.dashboard_tab, text="Connection", padding=16)
-        top.pack(fill=tk.X)
-        left = ttk.Frame(top)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ttk.Label(left, textvariable=self.status_var, style="Status.TLabel").pack(anchor=tk.W)
-        ttk.Label(left, textvariable=self.secondary_var, style="Subtle.TLabel").pack(anchor=tk.W, pady=(4, 12))
-        chooser = ttk.Frame(left)
-        chooser.pack(fill=tk.X)
-        ttk.Label(chooser, text="Active profile").pack(side=tk.LEFT)
-        self.active_combo = ttk.Combobox(chooser, textvariable=self.active_profile_var, state="readonly", width=52)
-        self.active_combo.pack(side=tk.LEFT, padx=(10, 0))
-        self.active_combo.bind("<<ComboboxSelected>>", lambda _event: self.on_active_profile_changed())
-        self.connect_button = ttk.Button(top, text="Connect", style="Accent.TButton", command=self.on_connect_clicked)
-        self.connect_button.pack(side=tk.RIGHT, padx=(18, 0), ipadx=20, ipady=8)
+        p = self._palette
+        body = ttk.Frame(self.dashboard_tab, padding=(8, 10, 8, 8))
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
 
-        route = ttk.LabelFrame(self.dashboard_tab, text="Routing", padding=16)
-        route.pack(fill=tk.X, pady=(12, 0))
-        ttk.Radiobutton(route, text="Proxy", variable=self.mode_var, value="proxy", command=self.on_settings_changed).pack(side=tk.LEFT)
-        ttk.Radiobutton(route, text="Tunnel", variable=self.mode_var, value="tunnel", command=self.on_settings_changed).pack(side=tk.LEFT, padx=(18, 0))
-        ttk.Checkbutton(route, text="Use Windows system proxy", variable=self.use_proxy_var, command=self.on_settings_changed).pack(side=tk.LEFT, padx=(24, 0))
-        ttk.Label(route, textvariable=self.endpoint_var, style="Subtle.TLabel").pack(side=tk.RIGHT)
+        # ── Hero card ──
+        hero = ttk.Frame(body, style="Card.TFrame", padding=(22, 20))
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        hero.columnconfigure(0, weight=1)
 
-        metrics = ttk.LabelFrame(self.dashboard_tab, text="This session", padding=16)
-        metrics.pack(fill=tk.X, pady=(12, 0))
-        for title, variable in (
-            ("Down", self.down_var),
-            ("Up", self.up_var),
-            ("Total", self.total_var),
-            ("Uptime", self.uptime_var),
-            ("Egress", self.egress_var),
-        ):
-            box = ttk.Frame(metrics)
-            box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            ttk.Label(box, text=title, style="Subtle.TLabel").pack(anchor=tk.W)
-            ttk.Label(box, textvariable=variable, style="Metric.TLabel").pack(anchor=tk.W, pady=(2, 0))
-        ttk.Button(metrics, text="Refresh egress", command=self.refresh_egress).pack(side=tk.RIGHT)
+        left = ttk.Frame(hero, style="Card.TFrame")
+        left.grid(row=0, column=0, sticky="ew")
+        left.columnconfigure(1, weight=1)
 
-        hint = ttk.LabelFrame(self.dashboard_tab, text="Windows notes", padding=16)
-        hint.pack(fill=tk.X, pady=(12, 0))
+        dot_canvas_bg = self._lookup_card_bg()
+        self._status_dot = tk.Canvas(
+            left,
+            width=18,
+            height=18,
+            highlightthickness=0,
+            bd=0,
+            background=dot_canvas_bg,
+        )
+        self._status_dot.create_oval(2, 2, 16, 16, fill=p["subtle"], outline="", tags="dot")
+        self._status_dot.grid(row=0, column=0, sticky="w", padx=(0, 12), pady=(6, 0))
+        self._themed_canvases.append(self._status_dot)
+
+        ttk.Label(left, textvariable=self.status_var, style="Status.TLabel").grid(
+            row=0, column=1, sticky="w"
+        )
         ttk.Label(
-            hint,
+            left, textvariable=self.secondary_var, style="Subtle.TLabel"
+        ).grid(row=1, column=1, sticky="w", pady=(2, 14))
+
+        chooser = ttk.Frame(left, style="Card.TFrame")
+        chooser.grid(row=2, column=1, sticky="ew")
+        ttk.Label(chooser, text="ACTIVE PROFILE", style="Section.TLabel").pack(
+            side=tk.LEFT, padx=(0, 10), pady=(4, 0)
+        )
+        self.active_combo = ttk.Combobox(
+            chooser, textvariable=self.active_profile_var, state="readonly", width=44
+        )
+        self.active_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.active_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self.on_active_profile_changed()
+        )
+
+        right = ttk.Frame(hero, style="Card.TFrame")
+        right.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        self.connect_button = ttk.Button(
+            right,
+            text=f"{ICON_POWER}  Connect",
+            style="Hero.Accent.TButton",
+            command=self.on_connect_clicked,
+        )
+        self.connect_button.pack(pady=(2, 0))
+
+        # ── Routing card ──
+        routing = ttk.LabelFrame(body, text="Routing", padding=(18, 12))
+        routing.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        routing.columnconfigure(99, weight=1)
+
+        self._proxy_radio = ttk.Radiobutton(
+            routing, text="Proxy", variable=self.mode_var, value="proxy",
+            command=self.on_settings_changed,
+        )
+        self._proxy_radio.grid(row=0, column=0, sticky="w")
+
+        self._tunnel_radio = ttk.Radiobutton(
+            routing, text="Tunnel", variable=self.mode_var, value="tunnel",
+            command=self.on_settings_changed, state="disabled",
+        )
+        self._tunnel_radio.grid(row=0, column=1, sticky="w", padx=(18, 6))
+        ttk.Label(routing, text="COMING SOON", style="Pill.Subtle.TLabel").grid(
+            row=0, column=2, sticky="w", padx=(0, 18)
+        )
+
+        ttk.Checkbutton(
+            routing,
+            text="Use Windows system proxy",
+            variable=self.use_proxy_var,
+            command=self.on_settings_changed,
+        ).grid(row=0, column=3, sticky="w")
+
+        ttk.Label(routing, textvariable=self.endpoint_var, style="Caption.TLabel").grid(
+            row=0, column=99, sticky="e"
+        )
+
+        # ── Metrics card ──
+        metrics = ttk.LabelFrame(body, text="Session metrics", padding=(18, 12))
+        metrics.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        for column in range(5):
+            metrics.columnconfigure(column, weight=1, uniform="metrics")
+
+        tiles = (
+            (ICON_DOWN,  "Download", self.down_var),
+            (ICON_UP,    "Upload",   self.up_var),
+            (ICON_SIGMA, "Total",    self.total_var),
+            (ICON_CLOCK, "Uptime",   self.uptime_var),
+            (ICON_GLOBE, "Egress",   self.egress_var),
+        )
+        for column, (icon, title, var) in enumerate(tiles):
+            tile = ttk.Frame(metrics)
+            tile.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+            header = ttk.Frame(tile)
+            header.pack(anchor="w")
+            ttk.Label(header, text=icon, style="Icon.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Label(header, text=title.upper(), style="MetricCaption.TLabel").pack(side=tk.LEFT)
+            ttk.Label(tile, textvariable=var, style="Metric.TLabel").pack(anchor="w", pady=(4, 0))
+
+        ttk.Button(
+            metrics, text=f"{ICON_REFRESH}  Refresh egress",
+            style="Toolbar.TButton", command=self.refresh_egress,
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(14, 0))
+
+        # ── Notes card ──
+        notes = ttk.LabelFrame(body, text="About this build", padding=(18, 12))
+        notes.grid(row=3, column=0, sticky="ew")
+        notes.columnconfigure(1, weight=1)
+
+        ttk.Label(notes, text=ICON_INFO, style="Icon.TLabel").grid(
+            row=0, column=0, sticky="nw", padx=(0, 10), pady=(2, 0)
+        )
+        ttk.Label(
+            notes,
             text=(
-                "Proxy mode mirrors Cloak's macOS system proxy path. "
-                "The packet listener uses WinDivert through pydivert, so the app must run as Administrator. "
-                "Tunnel mode is shown for parity, but requires a WinTun/tun2socks helper before it can route all traffic."
+                "Proxy mode mirrors Cloak's macOS system-proxy path. The packet "
+                "listener uses WinDivert via pydivert, so the app must run as "
+                "Administrator. Tunnel mode is shown for parity with macOS, but "
+                "needs a WinTun/tun2socks helper before it can route all traffic."
             ),
-            wraplength=900,
+            wraplength=820,
+            justify=tk.LEFT,
             style="Subtle.TLabel",
-        ).pack(anchor=tk.W)
-        if not is_admin():
-            ttk.Button(hint, text="Relaunch as Administrator", command=self.relaunch_admin).pack(anchor=tk.W, pady=(10, 0))
+        ).grid(row=0, column=1, sticky="ew")
+
+    # ── Profiles ────────────────────────────────────────────────────────────
 
     def _build_profiles(self) -> None:
-        toolbar = ttk.Frame(self.profiles_tab)
-        toolbar.pack(fill=tk.X)
-        ttk.Button(toolbar, text="Add", command=self.open_import_dialog).pack(side=tk.LEFT)
-        ttk.Button(toolbar, text="Import file", command=self.import_file).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="Rename", command=self.rename_selected_profile).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="Export", command=self.export_selected_profiles).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="Delete", command=self.delete_selected_profiles).pack(side=tk.LEFT, padx=(8, 0))
-        self.ping_button = ttk.Button(toolbar, text="Ping all", command=self.ping_all_profiles)
-        self.ping_button.pack(side=tk.LEFT, padx=(24, 0))
-        self.cancel_ping_button = ttk.Button(toolbar, text="Cancel ping", command=self.cancel_ping)
-        self.cancel_ping_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="Remove no ping", command=self.remove_no_ping).pack(side=tk.LEFT, padx=(8, 0))
+        body = ttk.Frame(self.profiles_tab, padding=(8, 10, 8, 10))
+        body.pack(fill=tk.BOTH, expand=True)
 
+        toolbar = ttk.Frame(body)
+        toolbar.pack(fill=tk.X, pady=(0, 10))
+
+        primary = (
+            (ICON_ADD,    "Add",         self.open_import_dialog),
+            (ICON_IMPORT, "Import file", self.import_file),
+            (ICON_RENAME, "Rename",      self.rename_selected_profile),
+            (ICON_EXPORT, "Export",      self.export_selected_profiles),
+            (ICON_DELETE, "Delete",      self.delete_selected_profiles),
+        )
+        for icon, label, cmd in primary:
+            ttk.Button(
+                toolbar, text=f"{icon}  {label}", style="Toolbar.TButton", command=cmd,
+            ).pack(side=tk.LEFT, padx=(0, 6))
+
+        ttk.Separator(toolbar, orient="vertical").pack(
+            side=tk.LEFT, fill=tk.Y, padx=10, pady=4
+        )
+
+        self.ping_button = ttk.Button(
+            toolbar, text=f"{ICON_PING}  Ping all",
+            style="Toolbar.TButton", command=self.ping_all_profiles,
+        )
+        self.ping_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.cancel_ping_button = ttk.Button(
+            toolbar, text=f"{ICON_CANCEL}  Cancel ping",
+            style="Toolbar.TButton", command=self.cancel_ping,
+        )
+        self.cancel_ping_button.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            toolbar, text=f"{ICON_BROOM}  Remove no-ping",
+            style="Toolbar.TButton", command=self.remove_no_ping,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(toolbar, textvariable=self.profile_count_var, style="Caption.TLabel").pack(
+            side=tk.RIGHT
+        )
+
+        # Container holds either the treeview or the empty state.
+        self._profile_container = ttk.Frame(body)
+        self._profile_container.pack(fill=tk.BOTH, expand=True)
+
+        self._profile_tree_frame = ttk.Frame(self._profile_container)
         columns = ("active", "name", "kind", "endpoint", "sni", "ping")
-        self.profile_tree = ttk.Treeview(self.profiles_tab, columns=columns, show="headings", selectmode="extended")
-        self.profile_tree.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
+        self.profile_tree = ttk.Treeview(
+            self._profile_tree_frame,
+            columns=columns,
+            show="headings",
+            selectmode="extended",
+        )
+        vsb = ttk.Scrollbar(
+            self._profile_tree_frame, orient="vertical", command=self.profile_tree.yview
+        )
+        self.profile_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.profile_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         headings = {
-            "active": "Active",
+            "active": "",
             "name": "Name",
-            "kind": "Kind",
+            "kind": "Protocol",
             "endpoint": "Server",
             "sni": "SNI / Host",
             "ping": "Ping",
         }
-        widths = {"active": 70, "name": 220, "kind": 90, "endpoint": 190, "sni": 260, "ping": 90}
-        for column in columns:
-            self.profile_tree.heading(column, text=headings[column])
-            self.profile_tree.column(column, width=widths[column], anchor=tk.W, stretch=column in ("name", "sni"))
-        self.profile_tree.bind("<Double-1>", lambda _event: self.activate_selected_profile())
+        widths = {
+            "active": 40, "name": 240, "kind": 110,
+            "endpoint": 200, "sni": 260, "ping": 90,
+        }
+        for col in columns:
+            self.profile_tree.heading(col, text=headings[col])
+            anchor = tk.CENTER if col == "active" else tk.W
+            self.profile_tree.column(col, width=widths[col], anchor=anchor,
+                                     stretch=col in ("name", "sni"))
+        self.profile_tree.bind("<Double-1>", lambda _e: self.activate_selected_profile())
+
+        self._profile_empty = ttk.Frame(self._profile_container, padding=(40, 60))
+        empty_inner = ttk.Frame(self._profile_empty)
+        empty_inner.place(relx=0.5, rely=0.45, anchor="center")
+        ttk.Label(empty_inner, text=ICON_GLOBE, font=self._fonts["icon_xl"],
+                  style="Subtle.TLabel").pack(pady=(0, 8))
+        ttk.Label(empty_inner, text="No profiles yet",
+                  style="Title.TLabel").pack(pady=(0, 6))
+        ttk.Label(
+            empty_inner,
+            text="Paste a vless://, trojan://, vmess://, or ss:// link to get started.",
+            style="Subtle.TLabel",
+        ).pack(pady=(0, 16))
+        ttk.Button(
+            empty_inner, text=f"{ICON_ADD}  Add a profile",
+            style="Accent.TButton", command=self.open_import_dialog,
+        ).pack()
+
+    # ── Settings ────────────────────────────────────────────────────────────
 
     def _build_settings(self) -> None:
-        self.settings_tab.columnconfigure(0, weight=1)
-        self.settings_tab.columnconfigure(1, weight=1)
+        outer = ttk.Frame(self.settings_tab, padding=(8, 10, 8, 10))
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=2)
+        outer.columnconfigure(1, weight=1)
 
-        cloud = ttk.LabelFrame(self.settings_tab, text="Cloudflare listener JSON", padding=12)
+        # ── Cloudflare listener (col 0) ──
+        cloud = ttk.LabelFrame(outer, text="Cloudflare listener JSON", padding=(14, 12))
         cloud.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self.listener_text = tk.Text(cloud, height=11, wrap=tk.NONE, font=("Consolas", 10), undo=True)
-        self.listener_text.pack(fill=tk.BOTH, expand=True)
+        cloud.rowconfigure(0, weight=1)
+        cloud.columnconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(cloud)
+        text_frame.grid(row=0, column=0, sticky="nsew")
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        self.listener_text = tk.Text(
+            text_frame,
+            height=12, wrap=tk.NONE, undo=True,
+            font=self._fonts["mono"],
+            relief=tk.FLAT, borderwidth=0, padx=10, pady=8,
+        )
+        self.listener_text.grid(row=0, column=0, sticky="nsew")
+        listener_vsb = ttk.Scrollbar(text_frame, orient="vertical",
+                                     command=self.listener_text.yview)
+        listener_vsb.grid(row=0, column=1, sticky="ns")
+        self.listener_text.configure(yscrollcommand=listener_vsb.set)
         self.listener_text.insert("1.0", self.listener_config.encode_json())
-        cloud_buttons = ttk.Frame(cloud)
-        cloud_buttons.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(cloud_buttons, text="Restore default", command=self.restore_listener_default).pack(side=tk.LEFT)
-        ttk.Button(cloud_buttons, text="Save", command=self.save_settings_from_controls).pack(side=tk.RIGHT)
+        self._themed_text_widgets.append(self.listener_text)
 
-        proxy = ttk.LabelFrame(self.settings_tab, text="Local proxy listeners", padding=12)
+        cloud_btns = ttk.Frame(cloud)
+        cloud_btns.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(cloud_btns, text="Restore default",
+                   style="Toolbar.TButton",
+                   command=self.restore_listener_default).pack(side=tk.LEFT)
+        ttk.Button(cloud_btns, text="Save settings",
+                   style="Accent.TButton",
+                   command=lambda: self.save_settings_from_controls(show_success=True)
+                   ).pack(side=tk.RIGHT)
+
+        # ── Local proxy listeners (col 1) ──
+        proxy = ttk.LabelFrame(outer, text="Local proxy listeners", padding=(14, 12))
         proxy.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        ttk.Checkbutton(proxy, text="Expose to LAN", variable=self.lan_var, command=self.on_lan_changed).grid(row=0, column=0, columnspan=2, sticky=tk.W)
-        ttk.Label(proxy, text="SOCKS port").grid(row=1, column=0, sticky=tk.W, pady=(14, 0))
-        ttk.Entry(proxy, textvariable=self.socks_port_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=(14, 0))
-        ttk.Label(proxy, text="HTTP port").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(proxy, textvariable=self.http_port_var, width=10).grid(row=2, column=1, sticky=tk.W, pady=(8, 0))
-        ttk.Label(proxy, text="xray log level").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Combobox(proxy, textvariable=self.log_level_var, values=("trace", "debug", "info", "warn", "error"), state="readonly", width=10).grid(row=3, column=1, sticky=tk.W, pady=(8, 0))
-        ttk.Checkbutton(proxy, text="Capture logs", variable=self.logs_enabled_var, command=self.on_settings_changed).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+        proxy.columnconfigure(1, weight=1)
 
-        paths = ttk.LabelFrame(self.settings_tab, text="Runtime paths", padding=12)
+        ttk.Checkbutton(proxy, text="Expose to LAN", variable=self.lan_var,
+                        command=self.on_lan_changed
+                        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        for row, label, var in (
+            (1, "SOCKS port", self.socks_port_var),
+            (2, "HTTP port",  self.http_port_var),
+        ):
+            ttk.Label(proxy, text=label).grid(row=row, column=0, sticky="w",
+                                              pady=(12, 0))
+            ttk.Spinbox(proxy, from_=1, to=65535, textvariable=var,
+                        width=10).grid(row=row, column=1, sticky="w",
+                                       pady=(12, 0), padx=(10, 0))
+
+        ttk.Label(proxy, text="xray log level").grid(row=3, column=0, sticky="w",
+                                                     pady=(12, 0))
+        ttk.Combobox(proxy, textvariable=self.log_level_var,
+                     values=("trace", "debug", "info", "warn", "error"),
+                     state="readonly", width=10
+                     ).grid(row=3, column=1, sticky="w", pady=(12, 0), padx=(10, 0))
+
+        ttk.Checkbutton(proxy, text="Capture logs", variable=self.logs_enabled_var,
+                        command=self.on_settings_changed
+                        ).grid(row=4, column=0, columnspan=2, sticky="w",
+                               pady=(14, 0))
+
+        # ── Runtime paths (row 1, full width) ──
+        paths = ttk.LabelFrame(outer, text="Runtime paths", padding=(14, 12))
         paths.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         paths.columnconfigure(1, weight=1)
-        ttk.Label(paths, text="xray.exe").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(paths, textvariable=self.xray_path_var).grid(row=0, column=1, sticky="ew", padx=(12, 8))
-        ttk.Button(paths, text="Browse", command=self.browse_xray).grid(row=0, column=2)
-        ttk.Label(paths, text="Python").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(paths, textvariable=self.python_path_var).grid(row=1, column=1, sticky="ew", padx=(12, 8), pady=(8, 0))
-        ttk.Button(paths, text="Use current", command=lambda: self.python_path_var.set("")).grid(row=1, column=2, pady=(8, 0))
 
-        appearance = ttk.LabelFrame(self.settings_tab, text="Appearance", padding=12)
-        appearance.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Combobox(appearance, textvariable=self.appearance_var, values=("system", "light", "dark"), state="readonly", width=12).pack(side=tk.LEFT)
-        ttk.Button(appearance, text="Save settings", command=self.save_settings_from_controls).pack(side=tk.RIGHT)
+        ttk.Label(paths, text="xray.exe").grid(row=0, column=0, sticky="w")
+        ttk.Entry(paths, textvariable=self.xray_path_var).grid(
+            row=0, column=1, sticky="ew", padx=(12, 8))
+        ttk.Button(paths, text="Browse", style="Toolbar.TButton",
+                   command=self.browse_xray).grid(row=0, column=2)
+
+        ttk.Label(paths, text="Python").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(paths, textvariable=self.python_path_var).grid(
+            row=1, column=1, sticky="ew", padx=(12, 8), pady=(10, 0))
+        ttk.Button(paths, text="Use current", style="Toolbar.TButton",
+                   command=lambda: self.python_path_var.set("")
+                   ).grid(row=1, column=2, pady=(10, 0))
+
+        # ── Appearance (row 2, full width) ──
+        appear = ttk.LabelFrame(outer, text="Appearance", padding=(14, 12))
+        appear.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        appear.columnconfigure(2, weight=1)
+
+        ttk.Label(appear, text="Theme").grid(row=0, column=0, sticky="w")
+        appearance_combo = ttk.Combobox(
+            appear, textvariable=self.appearance_var,
+            values=("system", "light", "dark"),
+            state="readonly", width=12,
+        )
+        appearance_combo.grid(row=0, column=1, sticky="w", padx=(10, 14))
+        appearance_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self.on_appearance_changed()
+        )
+        ttk.Label(
+            appear,
+            text="Choose Light, Dark, or follow the Windows app theme.",
+            style="Subtle.TLabel",
+        ).grid(row=0, column=2, sticky="w")
+
+    # ── Logs ────────────────────────────────────────────────────────────────
 
     def _build_logs(self) -> None:
-        buttons = ttk.Frame(self.logs_tab)
-        buttons.pack(fill=tk.X)
-        ttk.Button(buttons, text="Clear", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="Open app data", command=self.show_app_data).pack(side=tk.LEFT, padx=(8, 0))
-        self.log_text = tk.Text(self.logs_tab, wrap=tk.WORD, font=("Consolas", 10), state=tk.NORMAL)
-        self.log_text.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        body = ttk.Frame(self.logs_tab, padding=(8, 10, 8, 10))
+        body.pack(fill=tk.BOTH, expand=True)
+
+        toolbar = ttk.Frame(body)
+        toolbar.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(toolbar, text=f"{ICON_CLEAR}  Clear",
+                   style="Toolbar.TButton",
+                   command=lambda: self.log_text.delete("1.0", tk.END)
+                   ).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text=f"{ICON_COPY}  Copy all",
+                   style="Toolbar.TButton",
+                   command=self._copy_logs).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text=f"{ICON_FOLDER}  Open app data",
+                   style="Toolbar.TButton",
+                   command=self.show_app_data).pack(side=tk.LEFT, padx=(6, 0))
+
+        self._autoscroll_button = ttk.Button(
+            toolbar, text=f"{ICON_PAUSE}  Pause autoscroll",
+            style="Toolbar.TButton", command=self._toggle_autoscroll,
+        )
+        self._autoscroll_button.pack(side=tk.RIGHT)
+
+        wrap = ttk.Frame(body)
+        wrap.pack(fill=tk.BOTH, expand=True)
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+
+        self.log_text = tk.Text(
+            wrap, wrap=tk.WORD, font=self._fonts["mono"],
+            relief=tk.FLAT, borderwidth=0, padx=12, pady=10,
+            state=tk.NORMAL,
+        )
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        log_vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.log_text.yview)
+        log_vsb.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=log_vsb.set)
+        self._themed_text_widgets.append(self.log_text)
+        # apply ping/log tags now that the widget exists
+        self._retint_themed_widgets()
+
+    def _toggle_autoscroll(self) -> None:
+        self._autoscroll_paused = not self._autoscroll_paused
+        if self._autoscroll_paused:
+            self._autoscroll_button.configure(text=f"{ICON_PLAY}  Resume autoscroll")
+        else:
+            self._autoscroll_button.configure(text=f"{ICON_PAUSE}  Pause autoscroll")
+
+    def _copy_logs(self) -> None:
+        text = self.log_text.get("1.0", tk.END)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._show_toast("Logs copied to clipboard")
+
+    # ── About ───────────────────────────────────────────────────────────────
 
     def _build_about(self) -> None:
-        text = (
-            "Cloak for Windows is a Windows port of g3ntrix/Cloak.\n\n"
-            "Implemented here: profile library, VLESS/Trojan/VMess/Shadowsocks import, real curl-based ping, "
-            "Xray config generation, Python SNI bridge process control, Windows system proxy toggling, egress lookup, "
-            "logs, and persisted settings.\n\n"
-            "License: GPL-3.0, matching the upstream project."
-        )
-        ttk.Label(self.about_tab, text=text, wraplength=880, justify=tk.LEFT).pack(anchor=tk.NW)
+        body = ttk.Frame(self.about_tab, padding=(32, 28))
+        body.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(body)
+        header.pack(anchor="w")
+
+        icon = ROOT_DIR / "assets" / "Cloak.png"
+        if icon.exists():
+            try:
+                self._about_icon = tk.PhotoImage(file=str(icon))
+                ttk.Label(header, image=self._about_icon).pack(side=tk.LEFT, padx=(0, 16))
+            except tk.TclError:
+                self._about_icon = None
+
+        text_col = ttk.Frame(header)
+        text_col.pack(side=tk.LEFT)
+        ttk.Label(text_col, text="Cloak for Windows", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(text_col, text="GPL-3.0 • port of g3ntrix/Cloak",
+                  style="Caption.TLabel").pack(anchor="w", pady=(2, 0))
+
+        ttk.Separator(body, orient="horizontal").pack(fill=tk.X, pady=(20, 18))
+
+        ttk.Label(
+            body,
+            text=(
+                "A Windows port of g3ntrix/Cloak — a macOS SNI-spoofing proxy client.\n\n"
+                "Implemented here: profile library, VLESS / Trojan / VMess / Shadowsocks "
+                "import, real curl-based ping, Xray config generation, Python SNI bridge "
+                "process control, Windows system-proxy toggling, egress lookup, logs, "
+                "and persisted settings."
+            ),
+            style="Subtle.TLabel",
+            wraplength=720,
+            justify=tk.LEFT,
+        ).pack(anchor="w")
+
+    # ── Toast ───────────────────────────────────────────────────────────────
+
+    def _build_toast(self) -> None:
+        self._toast_label = ttk.Label(self, textvariable=self.toast_var, style="Toast.TLabel")
+        # Not packed until needed.
+
+    def _show_toast(self, message: str, duration_ms: int = 2200) -> None:
+        if self._toast_after_id:
+            try:
+                self.after_cancel(self._toast_after_id)
+            except Exception:
+                pass
+        self.toast_var.set(message)
+        try:
+            self._toast_label.place(relx=1.0, rely=1.0, x=-22, y=-18, anchor="se")
+            self._toast_label.lift()
+        except tk.TclError:
+            return
+        self._toast_after_id = self.after(duration_ms, self._hide_toast)
+
+    def _hide_toast(self) -> None:
+        try:
+            self._toast_label.place_forget()
+        except tk.TclError:
+            pass
+        self._toast_after_id = None
+
+    # ── Refresh helpers ─────────────────────────────────────────────────────
 
     def refresh_all(self) -> None:
         self.refresh_active_combo()
         self.refresh_profile_tree()
         self.refresh_status()
+        host = self.settings.resolved_socks_host_for_local_client
         self.endpoint_var.set(
-            f"SOCKS {self.settings.resolved_socks_host_for_local_client}:{self.settings.listen_port}    "
-            f"HTTP {self.settings.resolved_socks_host_for_local_client}:{self.settings.http_port}"
+            f"SOCKS  {host}:{self.settings.listen_port}   ·   "
+            f"HTTP  {host}:{self.settings.http_port}"
         )
 
     def seed_bundled_profiles_if_needed(self) -> None:
@@ -318,47 +1075,126 @@ class CloakWindowsApp(tk.Tk):
         self.active_profile_var.set(self._profile_label(active) if active else "")
 
     def refresh_profile_tree(self) -> None:
+        count = len(self.profiles)
+        self.profile_count_var.set(f"{count} profile{'s' if count != 1 else ''}")
+
+        # Toggle empty state
+        if not self.profiles:
+            self._profile_tree_frame.pack_forget()
+            self._profile_empty.pack(fill=tk.BOTH, expand=True)
+            self.profile_tree.delete(*self.profile_tree.get_children())
+            return
+        self._profile_empty.pack_forget()
+        if not self._profile_tree_frame.winfo_ismapped():
+            self._profile_tree_frame.pack(fill=tk.BOTH, expand=True)
+
         self.profile_tree.delete(*self.profile_tree.get_children())
         for profile in self.profiles:
             result = self.ping_results.get(profile.id)
-            ping = ""
-            if result:
-                ping = f"{result.millis} ms" if result.millis is not None else result.error or "failed"
+            if result and result.millis is not None:
+                ping_label = f"{result.millis} ms"
+                if result.millis < 100:
+                    ping_tag = "ping_good"
+                elif result.millis < 250:
+                    ping_tag = "ping_okay"
+                else:
+                    ping_tag = "ping_bad"
+            elif result:
+                ping_label = result.error or "failed"
+                ping_tag = "ping_bad"
+            else:
+                ping_label = ""
+                ping_tag = "ping_dead"
             self.profile_tree.insert(
                 "",
                 tk.END,
                 iid=profile.id,
+                tags=(ping_tag,),
                 values=(
-                    "Yes" if self.settings.active_profile_id == profile.id else "",
+                    "●" if self.settings.active_profile_id == profile.id else "",
                     profile.name,
                     profile.display_kind,
                     f"{profile.server}:{profile.server_port}",
                     profile.subtitle,
-                    ping,
+                    ping_label,
                 ),
             )
+
+    def _refresh_status_dot(self) -> None:
+        if not hasattr(self, "_status_dot"):
+            return
+        p = self._palette
+        status = self.controller.status
+        color = {
+            "running":  p["success"],
+            "starting": p["warn"],
+            "stopping": p["warn"],
+            "error":    p["danger"],
+        }.get(status, p["subtle"])
+        try:
+            self._status_dot.itemconfig("dot", fill=color)
+        except tk.TclError:
+            pass
+
+    def _pulse_status_dot(self) -> None:
+        if self.controller.status not in ("starting", "stopping"):
+            self._pulse_after_id = None
+            self._refresh_status_dot()
+            return
+        p = self._palette
+        self._pulse_phase = not self._pulse_phase
+        color = p["warn"] if self._pulse_phase else p["pill_warn_bg"]
+        try:
+            self._status_dot.itemconfig("dot", fill=color)
+        except tk.TclError:
+            return
+        self._pulse_after_id = self.after(550, self._pulse_status_dot)
 
     def refresh_status(self) -> None:
         status = self.controller.status
         self.status_var.set(self.controller.status_message)
         active = self.active_profile()
         if status == "running":
-            self.connect_button.configure(text="Disconnect", state=tk.NORMAL)
+            self.connect_button.configure(
+                text=f"{ICON_POWER}  Disconnect",
+                state=tk.NORMAL, style="Hero.Danger.TButton",
+            )
             self.secondary_var.set(f"Profile: {active.name if active else 'none'}")
         elif status in ("starting", "stopping"):
-            self.connect_button.configure(text="Please wait", state=tk.DISABLED)
+            self.connect_button.configure(
+                text=f"{ICON_POWER}  Please wait",
+                state=tk.DISABLED, style="Hero.Accent.TButton",
+            )
             self.secondary_var.set(self.controller.status_message)
         elif status == "error":
-            self.connect_button.configure(text="Connect", state=tk.NORMAL)
+            self.connect_button.configure(
+                text=f"{ICON_POWER}  Connect",
+                state=tk.NORMAL, style="Hero.Accent.TButton",
+            )
             self.secondary_var.set(self.controller.status_message)
         else:
-            self.connect_button.configure(text="Connect", state=tk.NORMAL)
-            self.secondary_var.set("No profile selected. Import or pick one from Profiles." if not active else f"Profile: {active.name}")
+            self.connect_button.configure(
+                text=f"{ICON_POWER}  Connect",
+                state=tk.NORMAL, style="Hero.Accent.TButton",
+            )
+            self.secondary_var.set(
+                "No profile selected. Import or pick one from Profiles."
+                if not active else f"Profile: {active.name}"
+            )
+
+        self._refresh_status_dot()
+        if status in ("starting", "stopping") and self._pulse_after_id is None:
+            self._pulse_after_id = self.after(120, self._pulse_status_dot)
+
+    # ── Profile actions ─────────────────────────────────────────────────────
 
     def active_profile(self) -> Profile | None:
         if not self.settings.active_profile_id:
             return self.profiles[0] if self.profiles else None
-        return next((profile for profile in self.profiles if profile.id == self.settings.active_profile_id), None)
+        return next(
+            (profile for profile in self.profiles if profile.id == self.settings.active_profile_id),
+            None,
+        )
 
     def selected_profiles(self) -> list[Profile]:
         ids = set(self.profile_tree.selection())
@@ -399,11 +1235,22 @@ class CloakWindowsApp(tk.Tk):
             self.egress_var.set("Connect first")
             return
         self.egress_var.set("Resolving...")
-        self.controller.refresh_egress_async(lambda ok, text, country: self.post("egress", ok, text, country))
+        self.controller.refresh_egress_async(
+            lambda ok, text, country: self.post("egress", ok, text, country)
+        )
+
+    def on_appearance_changed(self) -> None:
+        mode = self.appearance_var.get()
+        self.settings.appearance_mode = mode
+        self.store.save_settings(self.settings)
+        self._apply_theme(mode)
 
     def on_settings_changed(self) -> None:
         previous_mode = self.settings.connection_mode
         previous_proxy = self.settings.use_system_proxy
+        # Tunnel is shown as a disabled placeholder; reject any attempt to set it.
+        if self.mode_var.get() == "tunnel":
+            self.mode_var.set("proxy")
         self.settings.connection_mode = self.mode_var.get()
         self.settings.use_system_proxy = self.use_proxy_var.get()
         self.settings.logs_enabled = self.logs_enabled_var.get()
@@ -421,8 +1268,8 @@ class CloakWindowsApp(tk.Tk):
 
     def save_settings_from_controls(self, show_success: bool = True) -> bool:
         try:
-            socks = int(self.socks_port_var.get().strip())
-            http = int(self.http_port_var.get().strip())
+            socks = int(str(self.socks_port_var.get()).strip())
+            http = int(str(self.http_port_var.get()).strip())
             if not 0 < socks <= 65535 or not 0 < http <= 65535:
                 raise ValueError("Ports must be between 1 and 65535.")
             listener = ListenerProjectConfig.decode(self.listener_text.get("1.0", tk.END))
@@ -432,12 +1279,17 @@ class CloakWindowsApp(tk.Tk):
         self.settings.listen_port = socks
         self.settings.http_port = http
         self.settings.set_exposes_to_lan(self.lan_var.get())
+        if self.mode_var.get() == "tunnel":
+            self.mode_var.set("proxy")
         self.settings.connection_mode = self.mode_var.get()
         self.settings.use_system_proxy = self.use_proxy_var.get()
         self.settings.log_level = self.log_level_var.get()
         self.settings.logs_enabled = self.logs_enabled_var.get()
         self.settings.appearance_mode = self.appearance_var.get()
-        self.settings.xray_path = "" if self.xray_path_var.get().strip() == str(DEFAULT_XRAY) else self.xray_path_var.get().strip()
+        self.settings.xray_path = (
+            "" if self.xray_path_var.get().strip() == str(DEFAULT_XRAY)
+            else self.xray_path_var.get().strip()
+        )
         self.settings.python_path = self.python_path_var.get().strip()
         self.listener_config = listener
         was_running = self.controller.is_running
@@ -448,7 +1300,7 @@ class CloakWindowsApp(tk.Tk):
         if was_running:
             self.restart_connection()
         if show_success:
-            messagebox.showinfo("Saved", "Settings saved.")
+            self._show_toast("Settings saved")
         return True
 
     def restore_listener_default(self) -> None:
@@ -456,24 +1308,77 @@ class CloakWindowsApp(tk.Tk):
         self.listener_text.insert("1.0", ListenerProjectConfig.default_json())
 
     def browse_xray(self) -> None:
-        path = filedialog.askopenfilename(title="Choose xray.exe", filetypes=[("xray.exe", "xray.exe"), ("Executable", "*.exe"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(
+            title="Choose xray.exe",
+            filetypes=[("xray.exe", "xray.exe"), ("Executable", "*.exe"),
+                       ("All files", "*.*")],
+        )
         if path:
             self.xray_path_var.set(path)
 
     def show_app_data(self) -> None:
         messagebox.showinfo("App data", str(self.store.app_dir))
 
-    def open_import_dialog(self) -> None:
-        dialog = tk.Toplevel(self)
-        dialog.title("Add profiles")
-        dialog.geometry("640x420")
+    # ── Dialogs ─────────────────────────────────────────────────────────────
+
+    def _prepare_dialog(self, dialog: tk.Toplevel) -> None:
+        dialog.configure(background=self._palette["bg"])
         dialog.transient(self)
         dialog.grab_set()
-        ttk.Label(dialog, text="Paste one or more vless://, trojan://, vmess://, or ss:// links.").pack(anchor=tk.W, padx=14, pady=(14, 4))
-        text = tk.Text(dialog, wrap=tk.WORD, font=("Consolas", 10))
-        text.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
+        if pywinstyles is not None and sys.platform == "win32":
+            try:
+                mode = sv_ttk.get_theme()
+                pywinstyles.change_header_color(
+                    dialog, "#1c1c1c" if mode == "dark" else "#f3f3f3"
+                )
+                pywinstyles.change_title_color(
+                    dialog, "#ffffff" if mode == "dark" else "#1a1a1a"
+                )
+            except Exception:
+                pass
+
+    def open_import_dialog(self) -> None:
+        p = self._palette
+        dialog = tk.Toplevel(self)
+        dialog.title("Add profiles")
+        dialog.geometry("680x500")
+        self._prepare_dialog(dialog)
+
+        body = ttk.Frame(dialog, padding=(20, 18))
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            body,
+            text="Paste one or more vless://, trojan://, vmess://, or ss:// links.",
+        ).pack(anchor="w")
+        ttk.Label(
+            body,
+            text="Each link on its own line. Duplicates are skipped automatically.",
+            style="Caption.TLabel",
+        ).pack(anchor="w", pady=(2, 10))
+
+        text_wrap = ttk.Frame(body)
+        text_wrap.pack(fill=tk.BOTH, expand=True)
+        text_wrap.rowconfigure(0, weight=1)
+        text_wrap.columnconfigure(0, weight=1)
+
+        text = tk.Text(
+            text_wrap, wrap=tk.WORD, font=self._fonts["mono"],
+            relief=tk.FLAT, borderwidth=0, padx=10, pady=8,
+            background=p["card_alt"], foreground=p["text"],
+            insertbackground=p["text"], selectbackground=p["accent"],
+            selectforeground=p["accent_fg"],
+        )
+        text.grid(row=0, column=0, sticky="nsew")
+        vsb = ttk.Scrollbar(text_wrap, orient="vertical", command=text.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=vsb.set)
+
+        footer = ttk.Frame(body)
+        footer.pack(fill=tk.X, pady=(12, 0))
+
         detected = tk.StringVar(value="0 links detected")
-        ttk.Label(dialog, textvariable=detected, style="Subtle.TLabel").pack(anchor=tk.W, padx=14)
+        ttk.Label(footer, textvariable=detected, style="Caption.TLabel").pack(side=tk.LEFT)
 
         def update_count(_event=None) -> None:
             count = count_candidates(text.get("1.0", tk.END))
@@ -482,22 +1387,31 @@ class CloakWindowsApp(tk.Tk):
         def submit() -> None:
             raw = text.get("1.0", tk.END)
             added, dupes, errors = self.add_profiles_from_text(raw)
-            messagebox.showinfo("Import complete", f"Added {added}. Duplicates skipped {dupes}. Failed {len(errors)}.")
             dialog.destroy()
+            summary = f"Added {added} · Skipped {dupes} duplicate{'s' if dupes != 1 else ''}"
+            if errors:
+                summary += f" · {len(errors)} failed"
+            self._show_toast(summary, duration_ms=3200)
 
         text.bind("<KeyRelease>", update_count)
-        buttons = ttk.Frame(dialog)
-        buttons.pack(fill=tk.X, padx=14, pady=14)
-        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="Add", command=submit).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(footer, text="Cancel", style="Toolbar.TButton",
+                   command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(footer, text=f"{ICON_ADD}  Add", style="Accent.TButton",
+                   command=submit).pack(side=tk.RIGHT, padx=(0, 8))
 
     def import_file(self) -> None:
-        path = filedialog.askopenfilename(title="Import profiles", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(
+            title="Import profiles",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
         if not path:
             return
         raw = Path(path).read_text(encoding="utf-8", errors="ignore")
         added, dupes, errors = self.add_profiles_from_text(raw)
-        messagebox.showinfo("Import complete", f"Added {added}. Duplicates skipped {dupes}. Failed {len(errors)}.")
+        summary = f"Added {added} · Skipped {dupes} duplicate{'s' if dupes != 1 else ''}"
+        if errors:
+            summary += f" · {len(errors)} failed"
+        self._show_toast(summary, duration_ms=3200)
 
     def add_profiles_from_text(self, raw: str) -> tuple[int, int, list[str]]:
         parsed, errors = import_many(raw)
@@ -537,10 +1451,17 @@ class CloakWindowsApp(tk.Tk):
         profile = selected[0]
         dialog = tk.Toplevel(self)
         dialog.title("Rename profile")
-        dialog.transient(self)
-        dialog.grab_set()
+        dialog.resizable(False, False)
+        self._prepare_dialog(dialog)
+
+        body = ttk.Frame(dialog, padding=(20, 18))
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="New name").pack(anchor="w")
         value = tk.StringVar(value=profile.name)
-        ttk.Entry(dialog, textvariable=value, width=48).pack(padx=16, pady=16)
+        entry = ttk.Entry(body, textvariable=value, width=46)
+        entry.pack(fill=tk.X, pady=(6, 14))
+        entry.focus_set()
+        entry.icursor(tk.END)
 
         def save() -> None:
             name = value.get().strip()
@@ -548,15 +1469,26 @@ class CloakWindowsApp(tk.Tk):
                 profile.name = name
                 self.store.save_profiles(self.profiles)
                 self.refresh_all()
+                self._show_toast(f"Renamed to “{name}”")
             dialog.destroy()
 
-        ttk.Button(dialog, text="Save", command=save).pack(pady=(0, 16))
+        button_row = ttk.Frame(body)
+        button_row.pack(fill=tk.X)
+        ttk.Button(button_row, text="Cancel", style="Toolbar.TButton",
+                   command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Save", style="Accent.TButton",
+                   command=save).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.bind("<Return>", lambda _e: save())
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
     def delete_selected_profiles(self) -> None:
         selected = self.selected_profiles()
         if not selected:
             return
-        if not messagebox.askyesno("Delete profiles", f"Delete {len(selected)} selected profile(s)?"):
+        if not messagebox.askyesno(
+            "Delete profiles",
+            f"Delete {len(selected)} selected profile(s)?",
+        ):
             return
         ids = {profile.id for profile in selected}
         self.profiles = [profile for profile in self.profiles if profile.id not in ids]
@@ -579,10 +1511,15 @@ class CloakWindowsApp(tk.Tk):
         except ProfileExportError as exc:
             messagebox.showerror("Export failed", str(exc))
             return
-        path = filedialog.asksaveasfilename(title="Export profiles", defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        path = filedialog.asksaveasfilename(
+            title="Export profiles",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt")],
+        )
         if not path:
             return
         Path(path).write_text(text, encoding="utf-8")
+        self._show_toast(f"Exported {len(selected)} profile{'s' if len(selected) != 1 else ''}")
 
     def ping_all_profiles(self) -> None:
         if not self.profiles:
@@ -603,10 +1540,16 @@ class CloakWindowsApp(tk.Tk):
         self.ping_cancel.set()
 
     def remove_no_ping(self) -> None:
-        doomed = [profile for profile in self.profiles if self.ping_results.get(profile.id, PingResult()).millis is None]
+        doomed = [
+            profile for profile in self.profiles
+            if self.ping_results.get(profile.id, PingResult()).millis is None
+        ]
         if not doomed:
             return
-        if not messagebox.askyesno("Remove no ping", f"Remove {len(doomed)} profile(s) without a successful ping?"):
+        if not messagebox.askyesno(
+            "Remove no ping",
+            f"Remove {len(doomed)} profile(s) without a successful ping?",
+        ):
             return
         doomed_ids = {profile.id for profile in doomed}
         self.profiles = [profile for profile in self.profiles if profile.id not in doomed_ids]
@@ -634,6 +1577,8 @@ class CloakWindowsApp(tk.Tk):
 
         self.controller.stop_async(after_stop)
 
+    # ── Queue / loop ────────────────────────────────────────────────────────
+
     def _drain_queue(self) -> None:
         try:
             while True:
@@ -658,7 +1603,9 @@ class CloakWindowsApp(tk.Tk):
                         messagebox.showerror("Disconnect failed", message)
                 elif kind == "egress":
                     ok, text, country = payload
-                    self.egress_var.set(f"{text} {country or ''}".strip() if ok else text)
+                    self.egress_var.set(
+                        f"{text} {country or ''}".strip() if ok else text
+                    )
                 elif kind == "ping_result":
                     profile_id, result = payload
                     self.ping_results[profile_id] = result
@@ -673,9 +1620,10 @@ class CloakWindowsApp(tk.Tk):
     def append_log(self, stream: str, text: str) -> None:
         if not self.settings.logs_enabled:
             return
-        prefix = "" if stream == "stdout" else ""
-        self.log_text.insert(tk.END, prefix + text)
-        self.log_text.see(tk.END)
+        tag = "stderr" if stream == "stderr" else "stdout"
+        self.log_text.insert(tk.END, text, (tag,))
+        if not self._autoscroll_paused:
+            self.log_text.see(tk.END)
 
     def _tick(self) -> None:
         self.controller.sample_bandwidth()
@@ -703,7 +1651,9 @@ class CloakWindowsApp(tk.Tk):
         return f"{profile.name} ({profile.display_kind})"
 
     def on_close(self) -> None:
-        if self.controller.is_running and not messagebox.askyesno("Quit Cloak", "Disconnect and quit?"):
+        if self.controller.is_running and not messagebox.askyesno(
+            "Quit Cloak", "Disconnect and quit?"
+        ):
             return
         try:
             self.controller.stop()

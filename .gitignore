@@ -38,3 +38,6 @@ desktop.ini
 
 /.venv
 windows-app/bin/xray.exe
+.codex./
+.claude/
+.kiro/
