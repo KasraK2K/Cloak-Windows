@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local runtime/app state
+data/
+*.log
+*.tmp
+*.bak
+
+# Downloaded runtime binaries and databases
+windows-app/bin/*
+!windows-app/bin/README.md
+
+# Local upstream reference clone
+upstream/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+/.venv
+windows-app/bin/xray.exe
