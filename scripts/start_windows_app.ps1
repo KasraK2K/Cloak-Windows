@@ -21,12 +21,15 @@ function Test-IsAdmin {
 
 if ($AsAdmin -and -not (Test-IsAdmin)) {
     Start-Process -FilePath "powershell" -ArgumentList @(
+        "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
         "`"$PSCommandPath`"",
         "-AsAdmin"
-    ) -WorkingDirectory $Root -Verb RunAs
+    ) -WorkingDirectory $Root -Verb RunAs -WindowStyle Hidden
     exit
 }
 

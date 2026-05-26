@@ -33,9 +33,15 @@ Then start the app as Administrator:
 powershell -ExecutionPolicy Bypass -File .\scripts\start_windows_app.ps1 -AsAdmin
 ```
 
+You can also double-click `Start-Cloak-Windows.vbs` from the project root. It launches the same app with the required Administrator prompt without leaving a PowerShell window open.
+
+`Start-Cloak-Windows.cmd` is kept as a visible-console fallback for troubleshooting.
+
 Administrator rights are required because the SNI listener uses WinDivert through `pydivert` to capture and inject TCP packets.
 
 If you do not use `-DownloadXray`, put `xray.exe` in `windows-app\bin\xray.exe`, or choose a custom path from Settings.
+
+Do not double-click `windows-app\bin\xray.exe` directly. Xray is only the runtime engine; Cloak starts it with a generated config when you press Connect.
 
 ## Files
 
